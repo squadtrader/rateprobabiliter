@@ -289,6 +289,12 @@ def main():
         else:
             print("  [ECHEC] tableau detaille introuvable.")
             _lister_tables(driver, "detail Fed")
+            # Sauvegarde le HTML complet pour inspection : si ce n'est pas
+            # un <table>, il faut voir la vraie structure (div/grid ?) pour
+            # adapter le code d'extraction en connaissance de cause.
+            with open("page_source_fed.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print("  [debug] HTML complet sauvegarde dans page_source_fed.html")
 
         # ---------- 3. SAUVEGARDE POUR INSPECTION ----------
         resultat = {"synthese_accueil": syntheses, "meetings_fed": meetings}
