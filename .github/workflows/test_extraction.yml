@@ -30,6 +30,7 @@ jobs:
         with:
           name: test-extraction-${{ github.run_number }}
           path: |
-            texte_page_brut.txt
-            test_capture.png
+            resultat_test.json
+            test_accueil.png
+            test_detail_fed.png
           retention-days: 7
