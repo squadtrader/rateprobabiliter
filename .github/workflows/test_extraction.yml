@@ -1,0 +1,35 @@
+name: Test extraction rateprobability
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Installer les dépendances
+        run: pip install selenium beautifulsoup4
+
+      - name: Lancer le script de test
+        run: python test_rateprobability.py
+
+      - name: Sauvegarder les résultats du test
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-extraction-${{ github.run_number }}
+          path: |
+            texte_page_brut.txt
+            test_capture.png
+          retention-days: 7
