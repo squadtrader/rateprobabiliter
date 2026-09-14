@@ -269,15 +269,24 @@ def _lister_tables(driver, etiquette):
 
 
 def main():
+    # IMPORTANT : chaque page utilise sa PROPRE session de navigateur
+    # (creation + fermeture independantes), plutot qu'une seule session
+    # reutilisee pour naviguer d'une page a l'autre. C'est exactement ce
+    # que fait copier_page.py (qui, lui, passe sans probleme sur GitHub
+    # Actions) : une session fraiche qui arrive directement sur une page
+    # ressemble moins a un bot qu'une session qui enchaine plusieurs
+    # pages differentes d'affilee - probablement ce qui declenchait la
+    # verification Cloudflare dans les runs precedents.
+
+    # ---------- 1. PAGE D'ACCUEIL ----------
+    print("=" * 70)
+    print(f"TEST 1 : tableau de synthese - {URL_ACCUEIL}")
+    print("=" * 70)
+    syntheses = {}
     driver = _creer_navigateur()
     try:
-        # ---------- 1. PAGE D'ACCUEIL ----------
-        print("=" * 70)
-        print(f"TEST 1 : tableau de synthese - {URL_ACCUEIL}")
-        print("=" * 70)
         _preparer_page(driver, URL_ACCUEIL)
         _capture_ecran(driver, "test_accueil.png")
-
         syntheses = extraire_synthese_accueil(driver)
         if syntheses:
             print(f"  [OK] {len(syntheses)}/6 banque(s) extraite(s) :\n")
@@ -291,13 +300,17 @@ def main():
         else:
             print("  [ECHEC] tableau de synthese introuvable.")
             _lister_tables(driver, "d'accueil")
+    finally:
+        driver.quit()
 
-        # ---------- 2. PAGE DETAIL ----------
-        time.sleep(3)  # pause avant la 2e page, pour ne pas ressembler a un bot qui enchaine trop vite
-        print()
-        print("=" * 70)
-        print(f"TEST 2 : tableau detaille - {URL_DETAIL_TEST}")
-        print("=" * 70)
+    # ---------- 2. PAGE DETAIL (nouvelle session, independante) ----------
+    print()
+    print("=" * 70)
+    print(f"TEST 2 : tableau detaille - {URL_DETAIL_TEST}")
+    print("=" * 70)
+    meetings = []
+    driver = _creer_navigateur()
+    try:
         _preparer_page(driver, URL_DETAIL_TEST)
         _capture_ecran(driver, "test_detail_fed.png")
 
@@ -315,27 +328,23 @@ def main():
                 print("  [debug] BLOQUE PAR CLOUDFLARE : la page de verification anti-bot")
                 print("          ne s'est pas resolue meme apres l'attente supplementaire.")
             _lister_tables(driver, "detail Fed")
-            # Sauvegarde le HTML complet pour inspection : si ce n'est pas
-            # un <table>, il faut voir la vraie structure (div/grid ?) pour
-            # adapter le code d'extraction en connaissance de cause.
             with open("page_source_fed.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             print("  [debug] HTML complet sauvegarde dans page_source_fed.html")
-
-        # ---------- 3. SAUVEGARDE POUR INSPECTION ----------
-        resultat = {"synthese_accueil": syntheses, "meetings_fed": meetings}
-        with open("resultat_test.json", "w", encoding="utf-8") as f:
-            json.dump(resultat, f, ensure_ascii=False, indent=2)
-
-        print()
-        print("=" * 70)
-        print("Fichiers generes : resultat_test.json, test_accueil.png, test_detail_fed.png")
-        succes = bool(syntheses) and bool(meetings)
-        print("RESULTAT GLOBAL :", "OK - pret pour Firestore" if succes else "ECHEC - voir [debug] ci-dessus")
-        print("=" * 70)
-
     finally:
         driver.quit()
+
+    # ---------- 3. SAUVEGARDE POUR INSPECTION ----------
+    resultat = {"synthese_accueil": syntheses, "meetings_fed": meetings}
+    with open("resultat_test.json", "w", encoding="utf-8") as f:
+        json.dump(resultat, f, ensure_ascii=False, indent=2)
+
+    print()
+    print("=" * 70)
+    print("Fichiers generes : resultat_test.json, test_accueil.png, test_detail_fed.png")
+    succes = bool(syntheses) and bool(meetings)
+    print("RESULTAT GLOBAL :", "OK - pret pour Firestore" if succes else "ECHEC - voir [debug] ci-dessus")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
