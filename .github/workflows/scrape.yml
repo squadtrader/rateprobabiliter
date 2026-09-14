@@ -1,0 +1,57 @@
+name: Capture rateprobability.com
+
+on:
+  # Lancement manuel depuis l'onglet "Actions" de GitHub
+  workflow_dispatch:
+
+  # Décommente les 2 lignes suivantes pour un lancement automatique
+  # (ici : tous les jours à 8h00 UTC) en plus du lancement manuel
+  # schedule:
+  #   - cron: '0 8 * * *'
+
+permissions:
+  contents: write  # nécessaire pour que le workflow puisse committer dans le dépôt
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Lancer le script
+        run: python copier_page.py
+
+      - name: Sauvegarder les fichiers générés (téléchargement immédiat)
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultats-${{ github.run_number }}
+          path: |
+            *.png
+            *.xlsx
+          retention-days: 30
+
+      - name: Archiver les résultats dans le dépôt (historique permanent)
+        run: |
+          DOSSIER="data/$(date +'%Y-%m-%d_%H%M%S')"
+          mkdir -p "$DOSSIER"
+          # Déplace uniquement les fichiers générés par le script (s'ils existent)
+          shopt -s nullglob
+          for f in *.png *.xlsx; do
+            mv "$f" "$DOSSIER/"
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$DOSSIER"
+          git commit -m "Résultats du $(date +'%Y-%m-%d %H:%M') UTC" || echo "Rien à committer"
+          git push
