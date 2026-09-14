@@ -162,8 +162,29 @@ def _capture_ecran(driver, fichier):
         f.write(base64.b64decode(resultat["data"]))
 
 
+def _attendre_verification_cloudflare(driver, timeout=25):
+    """Certaines pages du site passent par une page de verification
+    Cloudflare ('Just a moment...') avant d'afficher le vrai contenu.
+    Elle se resout generalement seule au bout de quelques secondes une
+    fois le JS execute - on attend explicitement qu'elle disparaisse
+    plutot que de la prendre pour la page finale (son texte est court et
+    stable, ce qui faisait sortir _attendre_page_stable() trop tot)."""
+    marqueurs = ["just a moment", "performing security verification", "checking your browser"]
+    fin = time.time() + timeout
+    while time.time() < fin:
+        try:
+            texte = driver.execute_script("return document.body.innerText").lower()
+        except Exception:
+            texte = ""
+        if not any(m in texte for m in marqueurs):
+            return True
+        time.sleep(1)
+    return False  # toujours bloque a l'expiration du delai
+
+
 def _preparer_page(driver, url):
     driver.get(url)
+    _attendre_verification_cloudflare(driver, timeout=25)
     _accepter_cookies(driver)
     _attendre_page_stable(driver, timeout=20)
     _masquer_publicites_avec_attente(driver)
@@ -272,6 +293,7 @@ def main():
             _lister_tables(driver, "d'accueil")
 
         # ---------- 2. PAGE DETAIL ----------
+        time.sleep(3)  # pause avant la 2e page, pour ne pas ressembler a un bot qui enchaine trop vite
         print()
         print("=" * 70)
         print(f"TEST 2 : tableau detaille - {URL_DETAIL_TEST}")
@@ -288,6 +310,10 @@ def main():
                       f"delta {m['delta_vs_actuel_bps']}")
         else:
             print("  [ECHEC] tableau detaille introuvable.")
+            texte_page = driver.execute_script("return document.body.innerText")
+            if "just a moment" in texte_page.lower() or "security verification" in texte_page.lower():
+                print("  [debug] BLOQUE PAR CLOUDFLARE : la page de verification anti-bot")
+                print("          ne s'est pas resolue meme apres l'attente supplementaire.")
             _lister_tables(driver, "detail Fed")
             # Sauvegarde le HTML complet pour inspection : si ce n'est pas
             # un <table>, il faut voir la vraie structure (div/grid ?) pour
