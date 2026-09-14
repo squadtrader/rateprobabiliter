@@ -33,4 +33,5 @@ jobs:
             resultat_test.json
             test_accueil.png
             test_detail_fed.png
+            page_source_fed.html
           retention-days: 7
