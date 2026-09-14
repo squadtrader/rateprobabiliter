@@ -2,26 +2,37 @@
 """
 test_rateprobability.py - Test d'extraction isole, SANS Firestore.
 
-But : verifier que les regex de rateprobability_cloud.py trouvent bien
-les bonnes valeurs sur le vrai DOM, avant de brancher quoi que ce soit
-sur Firestore/le cron. N'ecrit rien nulle part a part une capture .png
-et les logs dans la console.
+But : verifier que le parsing des deux tableaux (page d'accueil +
+page detail d'une banque) fonctionne sur le vrai site, avant de brancher
+quoi que ce soit sur Firestore/le cron.
+N'ecrit rien nulle part a part des fichiers de debug locaux.
 
-Usage :
-    pip install selenium beautifulsoup4 --break-system-packages
+Usage (GitHub Actions ou local) :
+    pip install selenium beautifulsoup4
     python test_rateprobability.py
 """
 
-import re
+import os
 import time
 import base64
-import os
+import json
 
 from bs4 import BeautifulSoup
 
-URL_TEST = "https://rateprobability.com/fed"
+URL_ACCUEIL = "https://rateprobability.com/"
+URL_DETAIL_TEST = "https://rateprobability.com/fed"
+
+NOMS_VERS_CODE = {
+    "federal reserve": "fed",
+    "european central bank": "ecb",
+    "bank of england": "boe",
+    "bank of canada": "boc",
+    "bank of japan": "boj",
+    "reserve bank of australia": "rba",
+}
 
 
+# ---------- NAVIGATEUR ----------
 def _creer_navigateur():
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -34,6 +45,8 @@ def _creer_navigateur():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
@@ -86,116 +99,208 @@ def _attendre_page_stable(driver, timeout=20, pause=0.5, stabilite=1.0):
         time.sleep(pause)
 
 
-def _valeur_apres_label(texte, label, motif_valeur, fenetre=120):
-    m_label = re.search(re.escape(label), texte, re.IGNORECASE)
-    if not m_label:
-        return None
-    zone = texte[m_label.end():m_label.end() + fenetre]
-    m_valeur = re.search(motif_valeur, zone, re.IGNORECASE | re.DOTALL)
-    if not m_valeur:
-        return None
+def _masquer_publicites(driver):
+    script = """
+        const motsCles = ['ad-banner','advertisement','sticky-ad','ad-container',
+                           'adsbygoogle','taboola','outbrain','criteo','mediavine',
+                           'adthrive','grow-me','grow-banner','growjs','grow-widget',
+                           'grow-sticky','grow-unit','grow-native','promo-banner',
+                           'sticky-promo','ad-slot','ad-wrapper'];
+        function masquer(el) { el.style.setProperty('display', 'none', 'important'); }
+        function masquerAvecParents(el, niveaux) {
+            let courant = el;
+            for (let i = 0; i <= niveaux && courant && courant.tagName !== 'BODY'; i++) {
+                masquer(courant);
+                courant = courant.parentElement;
+            }
+        }
+        document.querySelectorAll('*').forEach(el => {
+            const idClasse = ((el.id || '') + ' ' + (el.className || '')).toLowerCase();
+            if (typeof idClasse !== 'string') return;
+            const contientGrowSeul = /(^|[^a-z])grow([^a-z]|$)/.test(idClasse) && !idClasse.includes('growth');
+            if (motsCles.some(m => idClasse.includes(m)) || contientGrowSeul) {
+                masquerAvecParents(el, 3);
+            }
+        });
+        document.querySelectorAll('*').forEach(el => {
+            const style = window.getComputedStyle(el);
+            if (style.position === 'fixed' || style.position === 'sticky') {
+                const z = parseInt(style.zIndex) || 0;
+                const rect = el.getBoundingClientRect();
+                const collePresDuBord = rect.top < 5 || (window.innerHeight - rect.bottom) < 5;
+                const tailleRaisonnable = rect.height > 20 && rect.height < window.innerHeight * 0.5;
+                if (z > 100 && !collePresDuBord && tailleRaisonnable) { masquer(el); }
+            }
+        });
+    """
     try:
-        groupe = m_valeur.group(1)
-    except IndexError:
-        return None
-    return groupe.strip() if groupe else None
+        driver.execute_script(script)
+    except Exception:
+        pass
 
 
-def extraire_tableau_meetings(driver):
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    table_cible = None
+def _masquer_publicites_avec_attente(driver, essais=3, delai=1.5):
+    for _ in range(essais):
+        _masquer_publicites(driver)
+        time.sleep(delai)
+    _masquer_publicites(driver)
+
+
+def _capture_ecran(driver, fichier):
+    metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
+    content_size = metrics["cssContentSize"]
+    resultat = driver.execute_cdp_cmd("Page.captureScreenshot", {
+        "format": "png",
+        "captureBeyondViewport": True,
+        "clip": {"x": 0, "y": 0, "width": content_size["width"],
+                 "height": content_size["height"], "scale": 1},
+    })
+    dossier = os.path.dirname(fichier)
+    if dossier:
+        os.makedirs(dossier, exist_ok=True)
+    with open(fichier, "wb") as f:
+        f.write(base64.b64decode(resultat["data"]))
+
+
+def _preparer_page(driver, url):
+    driver.get(url)
+    _accepter_cookies(driver)
+    _attendre_page_stable(driver, timeout=20)
+    _masquer_publicites_avec_attente(driver)
+
+
+# ---------- LECTURE DES TABLEAUX ----------
+def _trouver_table(soup, mots_cles_entete):
     for table in soup.find_all("table"):
         entete = table.find("tr")
         if not entete:
             continue
         texte_entete = entete.get_text(" ", strip=True).lower()
-        if "meeting" in texte_entete and "implied" in texte_entete:
-            table_cible = table
-            break
+        if all(mot in texte_entete for mot in mots_cles_entete):
+            return table
+    return None
 
-    if table_cible is None:
+
+def _lignes_table(table, nb_colonnes_min):
+    lignes = []
+    for ligne in table.find_all("tr")[1:]:
+        cellules = ligne.find_all(["td", "th"])
+        if len(cellules) < nb_colonnes_min:
+            continue
+        lignes.append([c.get_text(strip=True) for c in cellules])
+    return lignes
+
+
+def extraire_synthese_accueil(driver):
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    table = _trouver_table(soup, ["next meeting", "bank"])
+    if table is None:
+        return {}
+
+    syntheses = {}
+    for valeurs in _lignes_table(table, nb_colonnes_min=6):
+        nom_banque = valeurs[1].strip().lower()
+        code = NOMS_VERS_CODE.get(nom_banque)
+        if code is None:
+            continue
+        syntheses[code] = {
+            "prochaine_decision_date": valeurs[0],
+            "nom_banque_source": valeurs[1],
+            "taux_actuel": valeurs[2],
+            "probabilite": valeurs[3],
+            "sens_mouvement": valeurs[4],
+            "delta_vs_actuel_bps": valeurs[5],
+            "outcome_implicite": valeurs[6] if len(valeurs) > 6 else "",
+            "outlook_12m_bps": valeurs[7] if len(valeurs) > 7 else "",
+        }
+    return syntheses
+
+
+def extraire_tableau_meetings(driver):
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    table = _trouver_table(soup, ["meeting", "implied"])
+    if table is None:
         return []
 
-    lignes = table_cible.find_all("tr")
-    resultats = []
-    for ligne in lignes[1:]:
-        cellules = ligne.find_all(["td", "th"])
-        if len(cellules) < 4:
-            continue
-        valeurs = [c.get_text(strip=True) for c in cellules]
-        resultats.append({
-            "meeting": valeurs[0] if len(valeurs) > 0 else "",
-            "taux_implique": valeurs[1] if len(valeurs) > 1 else "",
-            "probabilite": valeurs[2] if len(valeurs) > 2 else "",
-            "nb_hikes_cuts": valeurs[3] if len(valeurs) > 3 else "",
+    meetings = []
+    for valeurs in _lignes_table(table, nb_colonnes_min=4):
+        meetings.append({
+            "meeting": valeurs[0],
+            "taux_implique": valeurs[1],
+            "probabilite": valeurs[2],
+            "nb_hikes_cuts": valeurs[3],
             "delta_vs_actuel_bps": valeurs[4] if len(valeurs) > 4 else "",
         })
-    return resultats
+    return meetings
+
+
+def _lister_tables(driver, etiquette):
+    """En cas d'echec, liste les en-tetes de TOUS les tableaux trouves :
+    permet de voir tout de suite si le tableau existe sous un autre
+    libelle, sans avoir a fouiller le HTML complet."""
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    tables = soup.find_all("table")
+    print(f"  [debug] {len(tables)} tableau(x) trouve(s) sur la page {etiquette} :")
+    for i, table in enumerate(tables):
+        entete = table.find("tr")
+        texte = entete.get_text(" | ", strip=True)[:150] if entete else "(pas de <tr>)"
+        print(f"    #{i} : {texte}")
 
 
 def main():
-    print(f"Ouverture de {URL_TEST} ...")
     driver = _creer_navigateur()
     try:
-        driver.get(URL_TEST)
-        _accepter_cookies(driver)
-        _attendre_page_stable(driver, timeout=20)
+        # ---------- 1. PAGE D'ACCUEIL ----------
+        print("=" * 70)
+        print(f"TEST 1 : tableau de synthese - {URL_ACCUEIL}")
+        print("=" * 70)
+        _preparer_page(driver, URL_ACCUEIL)
+        _capture_ecran(driver, "test_accueil.png")
 
-        # --- 1. Texte brut de la page, pour inspection manuelle ---
-        texte = driver.execute_script("return document.body.innerText")
-        with open("texte_page_brut.txt", "w", encoding="utf-8") as f:
-            f.write(texte)
-        print("Texte brut de la page sauvegardé dans texte_page_brut.txt (pour vérification manuelle)")
+        syntheses = extraire_synthese_accueil(driver)
+        if syntheses:
+            print(f"  [OK] {len(syntheses)}/6 banque(s) extraite(s) :\n")
+            for code, donnees in syntheses.items():
+                print(f"    {code.upper():5} {donnees['nom_banque_source']}")
+                print(f"          prochaine decision : {donnees['prochaine_decision_date']}")
+                print(f"          taux {donnees['taux_actuel']} | proba {donnees['probabilite']} "
+                      f"{donnees['sens_mouvement']} | outcome {donnees['outcome_implicite']}")
+                print(f"          delta {donnees['delta_vs_actuel_bps']} bps | "
+                      f"outlook 12m {donnees['outlook_12m_bps']} bps")
+        else:
+            print("  [ECHEC] tableau de synthese introuvable.")
+            _lister_tables(driver, "d'accueil")
 
-        # --- 2. Capture d'écran, pour comparaison visuelle ---
-        metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
-        content_size = metrics["cssContentSize"]
-        resultat = driver.execute_cdp_cmd("Page.captureScreenshot", {
-            "format": "png",
-            "captureBeyondViewport": True,
-            "clip": {"x": 0, "y": 0, "width": content_size["width"], "height": content_size["height"], "scale": 1},
-        })
-        with open("test_capture.png", "wb") as f:
-            f.write(base64.b64decode(resultat["data"]))
-        print("Capture sauvegardée dans test_capture.png")
+        # ---------- 2. PAGE DETAIL ----------
+        print()
+        print("=" * 70)
+        print(f"TEST 2 : tableau detaille - {URL_DETAIL_TEST}")
+        print("=" * 70)
+        _preparer_page(driver, URL_DETAIL_TEST)
+        _capture_ecran(driver, "test_detail_fed.png")
 
-        # --- 3. Extraction des champs, un par un, avec affichage clair ---
-        print("\n" + "=" * 60)
-        print("CHAMPS EXTRAITS :")
-        print("=" * 60)
+        meetings = extraire_tableau_meetings(driver)
+        if meetings:
+            print(f"  [OK] {len(meetings)} reunion(s) extraite(s) :\n")
+            for m in meetings:
+                print(f"    {m['meeting']:16} taux implique {m['taux_implique']:8} "
+                      f"proba {m['probabilite']:8} nb {m['nb_hikes_cuts']:6} "
+                      f"delta {m['delta_vs_actuel_bps']}")
+        else:
+            print("  [ECHEC] tableau detaille introuvable.")
+            _lister_tables(driver, "detail Fed")
 
-        champs = {
-            "taux_actuel": _valeur_apres_label(texte, "Current Rate", r"([\d.]+%)"),
-            "as_of_texte": _valeur_apres_label(texte, "As of:", r"([\d:]{3,5}\s+[\d/]{6,10})"),
-            "target_band": _valeur_apres_label(texte, "Target Band:", r"([\d.]+[\-–][\d.]+%)"),
-            "prochaine_decision_date": _valeur_apres_label(
-                texte, "Next decision in", r"\n\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}[^\n]*)", fenetre=200
-            ),
-            "prochaine_decision_pricing": _valeur_apres_label(
-                texte, "Next meeting pricing", r"(\d+%\s*(?:HIKE|CUT|HOLD))"
-            ),
-            "prochaine_decision_bps": _valeur_apres_label(
-                texte, "Next meeting pricing", r"(?:HIKE|CUT|HOLD)\)?\s*\n?\s*([+\-][\d.]+\s*bps)", fenetre=60
-            ),
-            "outlook_12m_bps": _valeur_apres_label(texte, "12-Month", r"([+\-][\d.]+\s*bps)"),
-            "outlook_12m_texte": _valeur_apres_label(
-                texte, "12-Month", r"(\d+\s*(?:or\s*\d+\s*)?(?:hikes?|cuts?))"
-            ),
-        }
+        # ---------- 3. SAUVEGARDE POUR INSPECTION ----------
+        resultat = {"synthese_accueil": syntheses, "meetings_fed": meetings}
+        with open("resultat_test.json", "w", encoding="utf-8") as f:
+            json.dump(resultat, f, ensure_ascii=False, indent=2)
 
-        for nom_champ, valeur in champs.items():
-            statut = "OK" if valeur else "MANQUANT"
-            print(f"  [{statut:9}] {nom_champ:30} = {valeur!r}")
-
-        tableau = extraire_tableau_meetings(driver)
-        print(f"\n  [{'OK' if tableau else 'MANQUANT':9}] tableau_meetings ({len(tableau)} ligne(s))")
-        for ligne in tableau[:3]:
-            print(f"      {ligne}")
-        if len(tableau) > 3:
-            print(f"      ... et {len(tableau) - 3} autre(s) ligne(s)")
-
-        print("\n" + "=" * 60)
-        print("Vérifie texte_page_brut.txt pour ajuster les regex si des champs sont MANQUANT.")
+        print()
+        print("=" * 70)
+        print("Fichiers generes : resultat_test.json, test_accueil.png, test_detail_fed.png")
+        succes = bool(syntheses) and bool(meetings)
+        print("RESULTAT GLOBAL :", "OK - pret pour Firestore" if succes else "ECHEC - voir [debug] ci-dessus")
+        print("=" * 70)
 
     finally:
         driver.quit()
