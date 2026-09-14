@@ -92,7 +92,13 @@ def _valeur_apres_label(texte, label, motif_valeur, fenetre=120):
         return None
     zone = texte[m_label.end():m_label.end() + fenetre]
     m_valeur = re.search(motif_valeur, zone, re.IGNORECASE | re.DOTALL)
-    return m_valeur.group(1).strip() if m_valeur else None
+    if not m_valeur:
+        return None
+    try:
+        groupe = m_valeur.group(1)
+    except IndexError:
+        return None
+    return groupe.strip() if groupe else None
 
 
 def extraire_tableau_meetings(driver):
@@ -169,7 +175,7 @@ def main():
                 texte, "Next meeting pricing", r"(\d+%\s*(?:HIKE|CUT|HOLD))"
             ),
             "prochaine_decision_bps": _valeur_apres_label(
-                texte, "Next meeting pricing", r"HIKE|CUT|HOLD\)?\s*\n?\s*([+\-][\d.]+\s*bps)", fenetre=60
+                texte, "Next meeting pricing", r"(?:HIKE|CUT|HOLD)\)?\s*\n?\s*([+\-][\d.]+\s*bps)", fenetre=60
             ),
             "outlook_12m_bps": _valeur_apres_label(texte, "12-Month", r"([+\-][\d.]+\s*bps)"),
             "outlook_12m_texte": _valeur_apres_label(
