@@ -243,14 +243,30 @@ def extraire_tableau_meetings(driver):
     if table is None:
         return []
 
+    # Sauvegarde TOUJOURS le HTML brut du tableau (avec ses attributs,
+    # pas juste le texte visible) : si des lignes dupliquees ont un
+    # attribut distinctif (data-step, data-scenario, timestamp cache...),
+    # ce sera visible ici alors que le texte des cellules seul ne le
+    # montre pas.
+    with open("tableau_fed_brut.html", "w", encoding="utf-8") as f:
+        f.write(table.prettify())
+
     meetings = []
-    for valeurs in _lignes_table(table, nb_colonnes_min=4):
+    for ligne in table.find_all("tr")[1:]:
+        cellules = ligne.find_all(["td", "th"])
+        if len(cellules) < 4:
+            continue
+        valeurs = [c.get_text(strip=True) for c in cellules]
         meetings.append({
             "meeting": valeurs[0],
             "taux_implique": valeurs[1],
             "probabilite": valeurs[2],
             "nb_hikes_cuts": valeurs[3],
             "delta_vs_actuel_bps": valeurs[4] if len(valeurs) > 4 else "",
+            # attributs bruts de la ligne, pour reperer ce qui distingue
+            # deux lignes affichant la meme date
+            "_attrs_ligne": dict(ligne.attrs),
+            "_attrs_cellules": [dict(c.attrs) for c in cellules],
         })
     return meetings
 
