@@ -34,4 +34,5 @@ jobs:
             test_accueil.png
             test_detail_fed.png
             page_source_fed.html
+            tableau_fed_brut.html
           retention-days: 7
